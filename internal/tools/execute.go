@@ -2,6 +2,7 @@ package tools
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"strings"
 
@@ -15,7 +16,7 @@ type ExecuteInput struct {
 	Script string `json:"script" jsonschema:"Lua source executed by Aseprite in batch mode. Write one coherent program. Read the workspace root from app.params.aseprite_mcp_workspace and save output beneath it."`
 }
 
-// ExecuteOutput is the result of a successful execute_lua call.
+// ExecuteOutput reports the outcome of an Aseprite process.
 type ExecuteOutput struct {
 	Stdout     string `json:"stdout"`
 	Stderr     string `json:"stderr"`
@@ -35,25 +36,15 @@ func AddExecuteTool(s *mcp.Server, deps Deps) {
 
 func (d Deps) execute(ctx context.Context, _ *mcp.CallToolRequest, in ExecuteInput) (*mcp.CallToolResult, ExecuteOutput, error) {
 	if strings.TrimSpace(in.Script) == "" {
-		return errorResult("script is empty"), ExecuteOutput{}, nil
+		return nil, ExecuteOutput{}, errors.New("script is empty")
 	}
 	if int64(len(in.Script)) > d.MaxScriptSize {
-		return errorResult(fmt.Sprintf("script is %d bytes, exceeding the %d byte limit", len(in.Script), d.MaxScriptSize)),
-			ExecuteOutput{}, nil
+		return nil, ExecuteOutput{}, fmt.Errorf("script is %d bytes, exceeding the %d byte limit", len(in.Script), d.MaxScriptSize)
 	}
 
 	res, err := d.Runner.Execute(ctx, in.Script)
 	if err != nil {
-		return errorResult("could not start Aseprite: " + err.Error()), ExecuteOutput{}, nil
-	}
-
-	truncated := res.StdoutTruncated || res.StderrTruncated
-	if res.TimedOut {
-		return errorResult(diagnostics("Aseprite timed out", res, truncated)), ExecuteOutput{}, nil
-	}
-	if res.ExitCode != 0 {
-		return errorResult(diagnostics(fmt.Sprintf("Aseprite exited with code %d", res.ExitCode), res, truncated)),
-			ExecuteOutput{}, nil
+		return nil, ExecuteOutput{}, fmt.Errorf("could not start Aseprite: %w", err)
 	}
 
 	out := ExecuteOutput{
@@ -61,10 +52,16 @@ func (d Deps) execute(ctx context.Context, _ *mcp.CallToolRequest, in ExecuteInp
 		Stderr:     res.Stderr,
 		ExitCode:   res.ExitCode,
 		DurationMs: res.Duration.Milliseconds(),
-		Truncated:  truncated,
+		Truncated:  res.StdoutTruncated || res.StderrTruncated,
+	}
+	if res.TimedOut {
+		return errorResult(diagnostics("Aseprite timed out", res, out.Truncated)), out, nil
+	}
+	if res.ExitCode != 0 {
+		return errorResult(diagnostics(fmt.Sprintf("Aseprite exited with code %d", res.ExitCode), res, out.Truncated)), out, nil
 	}
 	summary := fmt.Sprintf("Aseprite finished in %d ms.", out.DurationMs)
-	if truncated {
+	if out.Truncated {
 		summary += " Output was truncated."
 	}
 	if res.Stdout != "" {

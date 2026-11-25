@@ -102,10 +102,14 @@ func TestExecuteLuaEmptyScriptIsToolError(t *testing.T) {
 	if !res.IsError {
 		t.Error("empty script: expected tool error result")
 	}
+	if res.StructuredContent != nil {
+		t.Errorf("empty script returned process output: %+v", res.StructuredContent)
+	}
 }
 
 func TestExecuteLuaNonZeroExitIsToolError(t *testing.T) {
 	t.Setenv("FAKE_EXIT", "3")
+	t.Setenv("FAKE_STDOUT", "started")
 	t.Setenv("FAKE_STDERR", "lua boom")
 	cs := connect(t, depsForRoot(t, t.TempDir()))
 	res, err := cs.CallTool(context.Background(), &mcp.CallToolParams{
@@ -120,6 +124,31 @@ func TestExecuteLuaNonZeroExitIsToolError(t *testing.T) {
 	}
 	if !containsText(res.Content, "lua boom") {
 		t.Errorf("diagnostics missing stderr: %+v", res.Content)
+	}
+	out, ok := res.StructuredContent.(map[string]any)
+	if !ok || out["exit_code"] != float64(3) || out["stdout"] != "started" || out["stderr"] != "lua boom" {
+		t.Errorf("structured output does not match the failed process: %+v", res.StructuredContent)
+	}
+}
+
+func TestExecuteLuaTimeoutIsToolError(t *testing.T) {
+	t.Setenv("FAKE_SLEEP_MS", "2000")
+	deps := depsForRoot(t, t.TempDir())
+	deps.Runner = aseprite.NewRunner(asepritetest.Build(t), deps.Workspace, 100*time.Millisecond, 1<<20)
+	cs := connect(t, deps)
+	res, err := cs.CallTool(context.Background(), &mcp.CallToolParams{
+		Name:      "execute_lua",
+		Arguments: map[string]any{"script": "x=1"},
+	})
+	if err != nil {
+		t.Fatalf("CallTool: %v", err)
+	}
+	if !res.IsError || !containsText(res.Content, "timed out") {
+		t.Fatalf("expected timeout diagnostic, got %+v", res)
+	}
+	out, ok := res.StructuredContent.(map[string]any)
+	if !ok || out["exit_code"] != float64(-1) {
+		t.Errorf("expected timeout exit code -1, got %+v", res.StructuredContent)
 	}
 }
 
